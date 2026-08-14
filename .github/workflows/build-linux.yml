@@ -1,0 +1,120 @@
+name: build-linux
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      sync:
+        description: "Pull latest upstream main before building"
+        required: false
+        type: boolean
+        default: true
+      containerized:
+        description: "Build inside the electronuserland/builder Docker image (glibc 2.27 baseline)."
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: build-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build_linux:
+    name: Sync upstream + build Linux x64 AppImage
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Sync upstream main
+        if: github.event_name != 'push'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/nexu-io/open-design.git
+          git fetch upstream main --tags
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "already up to date with upstream"
+          else
+            if ! git merge upstream/main --no-edit; then
+              echo "::error::merge conflict with upstream; resolve manually then re-run"
+              exit 1
+            fi
+            echo "merged upstream/main"
+          fi
+          # Keep ONLY build-linux.yml. Upstream restores all the release/bot
+          # workflows on every merge, so prune them again before pushing.
+          find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) ! -name 'build-linux.yml' -delete
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "no changes to commit"
+          else
+            git add -A
+            git commit -m "chore: sync upstream and prune workflows"
+            git push origin HEAD:main
+            echo "pushed sync commit"
+          fi
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 10.33.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Linux AppImage
+        run: |
+          set -euo pipefail
+          tools_pack_dir="$RUNNER_TEMP/tools-pack"
+          namespace="github-build"
+          build_args=(
+            exec tools-pack linux build
+            --dir "$tools_pack_dir"
+            --namespace "$namespace"
+            --portable
+            --to appimage
+            --json
+          )
+          if [ "${{ github.event.inputs.containerized == 'true' }}" = "true" ]; then
+            build_args+=(--containerized)
+          fi
+          pnpm "${build_args[@]}"
+
+      - name: Locate AppImage
+        id: locate
+        run: |
+          appimage="$(find "$RUNNER_TEMP/tools-pack/out/linux/namespaces/github-build/builder" -maxdepth 1 -name '*.AppImage' -print -quit)"
+          if [ -z "$appimage" ]; then
+            echo "::error::AppImage not found under tools-pack output root"
+            exit 1
+          fi
+          echo "path=$appimage" >> "$GITHUB_OUTPUT"
+          echo "AppImage: $appimage"
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-design-linux-appimage
+          path: ${{ steps.locate.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
