@@ -32,6 +32,7 @@ jobs:
     outputs:
       version: ${{ steps.locations.outputs.version }}
       appimage_name: ${{ steps.locations.outputs.appimage_name }}
+      built: ${{ steps.locations.outputs.built }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -42,6 +43,7 @@ jobs:
           fetch-depth: 0
 
       - name: Sync upstream main
+        id: sync
         if: github.event_name != 'push'
         run: |
           set -euo pipefail
@@ -50,32 +52,42 @@ jobs:
           git remote add upstream https://github.com/nexu-io/open-design.git
           git fetch upstream main --tags
           if git merge-base --is-ancestor upstream/main HEAD; then
-            echo "already up to date with upstream"
-          else
-            if ! git merge upstream/main --no-edit; then
-              echo "::error::merge conflict with upstream; resolve manually then re-run"
-              exit 1
-            fi
-            echo "merged upstream/main"
+            echo "upstream unchanged, skipping build"
+            echo "new_upstream=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          if ! git merge upstream/main --no-edit; then
+            echo "::error::merge conflict with upstream; resolve manually then re-run"
+            exit 1
+          fi
+          echo "merged upstream/main"
           # Keep ONLY build-linux.yml. Upstream restores all the release/bot
           # workflows on every merge, so prune them again before pushing.
           find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) ! -name 'build-linux.yml' -delete
-          if git diff --quiet && git diff --cached --quiet; then
+          git add -A
+          if git diff --cached --quiet; then
             echo "no changes to commit"
           else
-            git add -A
             git commit -m "chore: sync upstream and prune workflows"
             git push origin HEAD:main
             echo "pushed sync commit"
           fi
+          echo "new_upstream=true" >> "$GITHUB_OUTPUT"
 
       - name: Setup pnpm
+        if: >-
+          github.event_name == 'push' ||
+          github.event_name == 'workflow_dispatch' ||
+          steps.sync.outputs.new_upstream == 'true'
         uses: pnpm/action-setup@v5
         with:
           version: 10.33.2
 
       - name: Setup Node.js
+        if: >-
+          github.event_name == 'push' ||
+          github.event_name == 'workflow_dispatch' ||
+          steps.sync.outputs.new_upstream == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: 24
@@ -83,9 +95,17 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
+        if: >-
+          github.event_name == 'push' ||
+          github.event_name == 'workflow_dispatch' ||
+          steps.sync.outputs.new_upstream == 'true'
         run: pnpm install --frozen-lockfile
 
       - name: Build Linux AppImage
+        if: >-
+          github.event_name == 'push' ||
+          github.event_name == 'workflow_dispatch' ||
+          steps.sync.outputs.new_upstream == 'true'
         run: |
           set -euo pipefail
           tools_pack_dir="$RUNNER_TEMP/tools-pack"
@@ -105,6 +125,10 @@ jobs:
 
       - name: Locate AppImage
         id: locations
+        if: >-
+          github.event_name == 'push' ||
+          github.event_name == 'workflow_dispatch' ||
+          steps.sync.outputs.new_upstream == 'true'
         run: |
           set -euo pipefail
           appimage="$(find "$RUNNER_TEMP/tools-pack/out/linux/namespaces/github-build/builder" -maxdepth 1 -name '*.AppImage' -print -quit)"
@@ -115,9 +139,14 @@ jobs:
           echo "path=$appimage" >> "$GITHUB_ENV"
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
           echo "appimage_name=$(basename "$appimage")" >> "$GITHUB_OUTPUT"
+          echo "built=true" >> "$GITHUB_OUTPUT"
           echo "AppImage: $appimage"
 
       - name: Upload AppImage artifact
+        if: >-
+          github.event_name == 'push' ||
+          github.event_name == 'workflow_dispatch' ||
+          steps.sync.outputs.new_upstream == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: open-design-linux-appimage
@@ -125,9 +154,19 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Report
+        if: always()
+        run: |
+          if [ "${{ steps.sync.outputs.new_upstream }}" = "false" ]; then
+            echo "No new upstream commits — build skipped."
+          elif [ "${{ steps.locations.outputs.built }}" = "true" ]; then
+            echo "Built and published successfully."
+          fi
+
   publish_release:
     name: Publish GitHub Release
     needs: build_linux
+    if: needs.build_linux.outputs.built == 'true'
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
