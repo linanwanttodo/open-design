@@ -118,3 +118,28 @@ jobs:
           path: ${{ steps.locate.outputs.path }}
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish rolling GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPIMAGE_PATH: ${{ steps.locate.outputs.path }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          tag="open-design-linux"
+          title="Open Design Linux AppImage v${version}"
+          body=$(printf 'Auto-built from commit `%s` on %s.\n\n- 构建时间: %s\n- 版本: %s\n- 文件: %s' \
+            "${GITHUB_SHA:0:7}" \
+            "${GITHUB_REF_NAME}" \
+            "$(TZ=UTC date -u +'%Y-%m-%d %H:%M UTC')" \
+            "${version}" \
+            "$(basename "$APPIMAGE_PATH")")
+          # Replace any previous rolling release so the tag always points at the newest build.
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          fi
+          gh release create "$tag" "$APPIMAGE_PATH" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$title" \
+            --notes "$body"
+          echo "Released: https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag"
