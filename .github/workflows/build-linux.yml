@@ -27,8 +27,11 @@ permissions:
 
 jobs:
   build_linux:
-    name: Sync upstream + build Linux x64 AppImage
+    name: Build Linux x64 AppImage
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.locations.outputs.version }}
+      appimage_name: ${{ steps.locations.outputs.appimage_name }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -101,44 +104,63 @@ jobs:
           pnpm "${build_args[@]}"
 
       - name: Locate AppImage
-        id: locate
+        id: locations
         run: |
+          set -euo pipefail
           appimage="$(find "$RUNNER_TEMP/tools-pack/out/linux/namespaces/github-build/builder" -maxdepth 1 -name '*.AppImage' -print -quit)"
           if [ -z "$appimage" ]; then
             echo "::error::AppImage not found under tools-pack output root"
             exit 1
           fi
-          echo "path=$appimage" >> "$GITHUB_OUTPUT"
+          echo "path=$appimage" >> "$GITHUB_ENV"
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+          echo "appimage_name=$(basename "$appimage")" >> "$GITHUB_OUTPUT"
           echo "AppImage: $appimage"
 
       - name: Upload AppImage artifact
         uses: actions/upload-artifact@v4
         with:
           name: open-design-linux-appimage
-          path: ${{ steps.locate.outputs.path }}
+          path: ${{ env.path }}
           if-no-files-found: error
           retention-days: 14
 
-      - name: Publish rolling GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          APPIMAGE_PATH: ${{ steps.locate.outputs.path }}
+  publish_release:
+    name: Publish GitHub Release
+    needs: build_linux
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build_linux.outputs.version }}
+      APPIMAGE_NAME: ${{ needs.build_linux.outputs.appimage_name }}
+    steps:
+      - name: Download AppImage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: open-design-linux-appimage
+          path: dist
+
+      - name: Create rolling GitHub Release
         run: |
           set -euo pipefail
-          version="$(node -p "require('./package.json').version")"
+          appimage="$(find dist -maxdepth 1 -name '*.AppImage' -print -quit)"
+          if [ -z "$appimage" ]; then
+            echo "::error::AppImage not found in downloaded artifact"
+            exit 1
+          fi
           tag="open-design-linux"
-          title="Open Design Linux AppImage v${version}"
+          title="Open Design Linux AppImage v${VERSION}"
           body=$(printf 'Auto-built from commit `%s` on %s.\n\n- 构建时间: %s\n- 版本: %s\n- 文件: %s' \
             "${GITHUB_SHA:0:7}" \
             "${GITHUB_REF_NAME}" \
             "$(TZ=UTC date -u +'%Y-%m-%d %H:%M UTC')" \
-            "${version}" \
-            "$(basename "$APPIMAGE_PATH")")
+            "${VERSION}" \
+            "${APPIMAGE_NAME}")
           # Replace any previous rolling release so the tag always points at the newest build.
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
           fi
-          gh release create "$tag" "$APPIMAGE_PATH" \
+          gh release create "$tag" "$appimage" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$title" \
             --notes "$body"
