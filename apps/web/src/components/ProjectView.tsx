@@ -375,7 +375,7 @@ type ProjectChatSendMeta = ChatSendMeta & {
    *  lives in the queue item, so a pre-run block (e.g. the AMR balance gate)
    *  must NOT re-queue it — only pause further drains. */
   queueDrain?: boolean;
-  /** The Open Design Cloud balance gate already ran for this exact send at
+  /** The OpenDesign Cloud balance gate already ran for this exact send at
    *  the home submit (with any soft warning answered there); skip re-gating
    *  so the user is never double-prompted for one task. */
   amrGatePrechecked?: boolean;
@@ -568,6 +568,8 @@ interface Props {
   /** Fresh route-bootstrap witnesses, reused to avoid repeating scope/detail reads. */
   initialWorkspaceScope?: ProjectWorkspaceScope | null;
   initialProjectDetail?: ProjectDetailSeed | null;
+  /** The seeded project row is a Team-bound placeholder, not content authority. */
+  initialMaterializationPending?: boolean;
   /** Workspace/member authorization lifetime for async title reads. */
   projectAuthorizationKey?: string;
   amrAuthRetryContinuation?: AmrAuthRetryContinuation | null;
@@ -905,7 +907,7 @@ function buildCreateDesignSystemFromProjectPrompt(input: {
       ]
     : ['- Active design system: (none)'];
   return [
-    'Create this project as a complete Open Design design system workspace.',
+    'Create this project as a complete OpenDesign design system workspace.',
     '',
     'Autonomy requirement:',
     '- Do not ask setup or clarification questions during design-system generation.',
@@ -994,7 +996,7 @@ function historyWithWorkspaceContext(
     '',
     '',
     '<active-workspace-context>',
-    'Open Design selected or inferred these workspace contexts for this turn. Treat absolute paths as reference context unless the user explicitly asks to edit them.',
+    'OpenDesign selected or inferred these workspace contexts for this turn. Treat absolute paths as reference context unless the user explicitly asks to edit them.',
     ...items.map((item, index) => {
       const details = [
         item.path ? `path: ${item.path}` : null,
@@ -1745,6 +1747,7 @@ export function ProjectView({
   workspaceContextOverride,
   initialWorkspaceScope,
   initialProjectDetail,
+  initialMaterializationPending = false,
   projectAuthorizationKey = project.id,
   amrAuthRetryContinuation = null,
   onArmAmrAuthRetryContinuation,
@@ -1896,7 +1899,7 @@ export function ProjectView({
     projectRunBillingContext ?? projectRunWorkspaceContext;
   const cloudModelSelected = config.mode === 'daemon' && config.agentId === 'amr';
   const projectRunRequiresWorkspaceScope = cloudModelSelected;
-  // An Open Design Cloud run needs a wallet, and the ONLY client-side veto is
+  // An OpenDesign Cloud run needs a wallet, and the ONLY client-side veto is
   // "there is no billing principal at all". Either witness suffices: the
   // caller's own cloud identity, or a project scope that already names an
   // explicit personal/team principal.
@@ -1968,8 +1971,17 @@ export function ProjectView({
   const projectCollab = useProjectCollab(project?.id ?? null, {
     workspaceContext: projectRunWorkspaceContext,
     workspaceContextLoading: projectWorkspaceScopeState.loading,
+    initialMaterializationPending,
     presenceFilePath: project?.metadata?.entryFile ?? null,
   });
+  // A Team-bound placeholder is safe to render and comment around, but its
+  // empty tree is never a writer authority. Reuse the established viewer-only
+  // gates for content/run/project mutations until the daemon's own status poll
+  // proves first materialization finished. Keep the read-only ownership banner
+  // keyed to `projectCollab.viewerOnly` below so an owner reinstall sees a
+  // syncing project, not the misleading “shared by someone else” notice.
+  const projectMutationReadOnly =
+    projectCollab.viewerOnly || projectCollab.materializationPending;
   const { resolve: resolvePresenceMember } = useTeamMembers(
     currentUserDirectoryEntry(projectRunWorkspaceContext),
     projectRunWorkspaceContext,
@@ -2027,6 +2039,9 @@ export function ProjectView({
     detailedProject,
     authoritativeProjectName,
   );
+  let projectTitleTooltip = currentProject.name;
+  if (projectMutationReadOnly) projectTitleTooltip = t('workspace.readonlyNotice');
+  if (projectCollab.materializationPending) projectTitleTooltip = t('designFiles.syncing');
   const resolvedProjectDesignSystemId = resolveProjectDesignSystemId(currentProject);
   // A project can outlive a Design System being disabled in Settings. Keep the
   // persisted project value intact for recovery, but do not inject a disabled
@@ -2639,12 +2654,14 @@ export function ProjectView({
     currentConversationHasActiveRun
     && !currentConversationStreaming
     && !currentConversationHasProgrammaticBrandExtractionRun;
-  const currentConversationSendDisabled = !projectRunHasBillableAmrPrincipal
+  const currentConversationSendDisabled = projectMutationReadOnly
+    || !projectRunHasBillableAmrPrincipal
     || currentConversationLoading
     || failedMessagesConversationId === activeConversationId
     || currentConversationAwaitingActiveRunAttach;
   const currentConversationActionDisabled = currentConversationBusy || currentConversationSendDisabled;
-  const currentConversationQueueDisabled = currentConversationLoading
+  const currentConversationQueueDisabled = projectMutationReadOnly
+    || currentConversationLoading
     || failedMessagesConversationId === activeConversationId;
 
   const currentConversationQueuedItems = activeConversationId
@@ -2661,7 +2678,7 @@ export function ProjectView({
           return { ...queuedItem, meta: item.meta };
         })
     : [];
-  const newConversationDisabled = creatingConversation;
+  const newConversationDisabled = creatingConversation || projectMutationReadOnly;
   const activeCompletionNotificationRunsRef = useRef<Set<string>>(new Set());
   const completedNotificationRunsRef = useRef<Set<string>>(new Set());
 
@@ -4827,6 +4844,7 @@ export function ProjectView({
         });
         return null;
       }
+      if (projectCollab.materializationPending) return null;
       // Upload any attached images first so the saved comment carries durable
       // file paths — this is what lets the comment list / re-opened popover
       // re-display the images instead of losing them on echo.
@@ -4890,6 +4908,7 @@ export function ProjectView({
       previewComments,
       projectRunWorkspaceContext,
       t,
+      projectCollab.materializationPending,
     ],
   );
 
@@ -4905,6 +4924,7 @@ export function ProjectView({
         });
         return false;
       }
+      if (projectCollab.materializationPending) return false;
       const ok = await deletePreviewComment(
         project.id,
         commentConversationId,
@@ -4931,6 +4951,7 @@ export function ProjectView({
       commitPreviewComments,
       projectRunWorkspaceContext,
       t,
+      projectCollab.materializationPending,
     ],
   );
 
@@ -4958,6 +4979,7 @@ export function ProjectView({
         });
         return;
       }
+      if (projectCollab.materializationPending) return;
       commitPreviewComments((current) =>
         current.map((comment) => (comment.id === commentId ? { ...comment, sortKey } : comment)),
       );
@@ -4986,6 +5008,7 @@ export function ProjectView({
       commitPreviewComments,
       projectRunWorkspaceContext,
       t,
+      projectCollab.materializationPending,
     ],
   );
 
@@ -5591,7 +5614,7 @@ export function ProjectView({
                 genericDisconnectRetriesRef.current.delete(runId);
               }
               genericDisconnectBackoffUntilRef.current.delete(runId);
-              replayedEvents = [...replayedEvents, ev];
+              replayedEvents = appendCoalescedAgentEvent(replayedEvents, ev);
               textBuffer.appendEvent(ev);
             },
             onDone: async () => {
@@ -6464,6 +6487,7 @@ export function ProjectView({
       meta?: ProjectChatSendMeta,
       baseMessages?: ChatMessage[],
     ) => {
+      if (projectMutationReadOnly) return false;
       if (!activeConversationId) return false;
       if (messagesConversationIdRef.current !== activeConversationId) return false;
       const clientRequestId = meta?.clientRequestId ?? randomUUID();
@@ -6587,7 +6611,7 @@ export function ProjectView({
         });
         return meta?.acceptQueuedHomeHandoff === true;
       }
-      // Open Design Cloud pre-run balance gate: a definitively insufficient
+      // OpenDesign Cloud pre-run balance gate: a definitively insufficient
       // wallet blocks the run BEFORE any message is persisted or a daemon run
       // spawned, surfacing the subscription dialog instead of a mid-run
       // AMR_INSUFFICIENT_BALANCE failure. Sends the home submit already gated
@@ -8157,6 +8181,7 @@ export function ProjectView({
       projectRunPreflightContext,
       projectRunWorkspaceContext,
       projectRunHasBillableAmrPrincipal,
+      projectMutationReadOnly,
       projectWorkspaceScopeState.scope,
     ],
   );
@@ -8868,7 +8893,7 @@ export function ProjectView({
     ],
   );
 
-  // "Share to Open Design" — kicks off the bundled `od-share-to-community`
+  // "Share to OpenDesign" — kicks off the bundled `od-share-to-community`
   // scenario in the active conversation. We just inject the trigger prompt
   // through the standard chat-send path; the agent then loads SKILL.md and
   // drives the rest. Keep this preparing state alive for the resulting chat
@@ -9005,6 +9030,7 @@ export function ProjectView({
   ]);
 
   const handleNewConversation = useCallback(async () => {
+    if (projectMutationReadOnly) return;
     if (creatingConversationRef.current) return;
     // Only block if we're sure the current conversation is empty:
     // messages must be loaded AND match the active conversation.
@@ -9069,6 +9095,7 @@ export function ProjectView({
     openTabsState.active,
     projectRunWorkspaceContext,
     projectRunAuthorityKey,
+    projectMutationReadOnly,
   ]);
 
   const handleSelectConversation = useCallback((id: string) => {
@@ -9131,6 +9158,7 @@ export function ProjectView({
 
   const handleDeleteConversation = useCallback(
     async (id: string) => {
+      if (projectMutationReadOnly) return;
       const ok = await deleteConversationApi(
         project.id,
         id,
@@ -9168,11 +9196,13 @@ export function ProjectView({
       activeConversationId,
       onProjectsRefresh,
       projectRunWorkspaceContext,
+      projectMutationReadOnly,
     ],
   );
 
   const handleRenameConversation = useCallback(
     async (id: string, title: string) => {
+      if (projectMutationReadOnly) return;
       const trimmed = title.trim() || null;
       setConversations((curr) =>
         curr.map((c) => (c.id === id ? { ...c, title: trimmed } : c)),
@@ -9184,11 +9214,12 @@ export function ProjectView({
         projectRunWorkspaceContext,
       );
     },
-    [project.id, projectRunWorkspaceContext],
+    [project.id, projectRunWorkspaceContext, projectMutationReadOnly],
   );
 
   const handleConversationSessionModeChange = useCallback(
     async (id: string, sessionMode: ChatSessionMode) => {
+      if (projectMutationReadOnly) return;
       setConversations((curr) =>
         curr.map((conversation) =>
           conversation.id === id ? { ...conversation, sessionMode } : conversation,
@@ -9208,7 +9239,7 @@ export function ProjectView({
         );
       }
     },
-    [project.id, projectRunWorkspaceContext],
+    [project.id, projectRunWorkspaceContext, projectMutationReadOnly],
   );
 
   const handleActiveConversationSessionModeChange = useCallback(
@@ -9221,7 +9252,7 @@ export function ProjectView({
 
   const handleForkFromMessage = useCallback(
     async (assistantMessage: ChatMessage) => {
-      if (!activeConversationId || forkingMessageId || projectCollab.viewerOnly) return;
+      if (!activeConversationId || forkingMessageId || projectMutationReadOnly) return;
       const requestId = analytics.newRequestId();
       const startedAt = Date.now();
       const forkIndex = messages.findIndex((message) => message.id === assistantMessage.id);
@@ -9335,7 +9366,7 @@ export function ProjectView({
       openTabsState.active,
       project.id,
       project.metadata,
-      projectCollab.viewerOnly,
+      projectMutationReadOnly,
       t,
     ],
   );
@@ -9349,6 +9380,7 @@ export function ProjectView({
   }>>(new Map());
   const handleProjectRename = useCallback(
     (newName: string) => {
+      if (projectMutationReadOnly) return;
       const trimmed = newName.trim();
       if (!trimmed || trimmed === project.name) return;
       const previousName = project.name;
@@ -9457,6 +9489,7 @@ export function ProjectView({
       onProjectRenameStarted,
       onProjectsRefresh,
       project,
+      projectMutationReadOnly,
     ],
   );
 
@@ -9507,6 +9540,7 @@ export function ProjectView({
 
   const handleChangeDesignSystemId = useCallback(
     (nextId: string | null) => {
+      if (projectMutationReadOnly) return;
       if ((projectDesignSystemId ?? null) === nextId) return;
       // `design_system_apply_result` studio variant. The existing
       // NewProjectPanel picker fires the same event under
@@ -9580,7 +9614,15 @@ export function ProjectView({
       onProjectChange(updated);
       void patchProject(project.id, { designSystemId: nextId }, projectRunWorkspaceContext);
     },
-    [project, projectDesignSystemId, onProjectChange, designSystems, analytics.track],
+    [
+      project,
+      projectDesignSystemId,
+      onProjectChange,
+      designSystems,
+      analytics.track,
+      projectMutationReadOnly,
+      projectRunWorkspaceContext,
+    ],
   );
 
   // Canonical project-type chip shown next to the editable title. We label
@@ -9651,6 +9693,7 @@ export function ProjectView({
   // `teamSynced`, i.e. the caller's own system or a built-in preset) reads as
   // editable, matching every other consumer of this field.
   const designSystemEditable =
+    !projectCollab.materializationPending &&
     designSystemProject?.canMutate !== false &&
     (
       !projectIsProgrammaticBrandExtraction ||
@@ -10953,10 +10996,12 @@ export function ProjectView({
               loading={currentConversationLoading}
               // A read-only viewer of a team-shared project cannot drive artifact
               // changes through chat (comments go through the separate overlay).
-              sendDisabled={currentConversationSendDisabled || projectCollab.viewerOnly}
-              viewerOnly={projectCollab.viewerOnly}
+              sendDisabled={currentConversationSendDisabled || projectMutationReadOnly}
+              viewerOnly={projectMutationReadOnly}
               composerPlaceholder={
-                projectCollab.viewerOnly
+                projectCollab.materializationPending
+                  ? t('designFiles.syncing')
+                  : projectMutationReadOnly
                   ? (projectCollab.ownerDisplayName
                       ? t('workspace.readonlyNoticeBy', { owner: projectCollab.ownerDisplayName })
                       : t('workspace.readonlyNotice'))
@@ -11053,7 +11098,7 @@ export function ProjectView({
               onArtifactShare={handleArtifactShare}
               onArtifactDownload={handleArtifactDownload}
               onForkFromMessage={
-                projectCollab.viewerOnly ? undefined : handleForkFromMessage
+                projectMutationReadOnly ? undefined : handleForkFromMessage
               }
               forkingMessageId={forkingMessageId}
               onNewConversation={handleNewConversation}
@@ -11149,15 +11194,15 @@ export function ProjectView({
               projectHeader={(
                 <span className="chat-project-title-line">
                   <span
-                    className={`title${projectCollab.viewerOnly ? ' readonly' : ' editable'}`}
+                    className={`title${projectMutationReadOnly ? ' readonly' : ' editable'}`}
                     data-testid="project-title"
-                    title={projectCollab.viewerOnly ? t('workspace.readonlyNotice') : currentProject.name}
-                    tabIndex={projectCollab.viewerOnly ? -1 : 0}
-                    role={projectCollab.viewerOnly ? undefined : 'textbox'}
+                    title={projectTitleTooltip}
+                    tabIndex={projectMutationReadOnly ? -1 : 0}
+                    role={projectMutationReadOnly ? undefined : 'textbox'}
                     suppressContentEditableWarning
-                    contentEditable={!projectCollab.viewerOnly}
+                    contentEditable={!projectMutationReadOnly}
                     onBlur={(e) => {
-                      if (projectCollab.viewerOnly) return;
+                      if (projectMutationReadOnly) return;
                       handleProjectRename(e.currentTarget.textContent ?? '');
                     }}
                     onKeyDown={(e) => {
@@ -11180,7 +11225,7 @@ export function ProjectView({
                   designSystems={designSystems}
                   selectedId={projectDesignSystemId ?? null}
                   workspaceContext={projectRunWorkspaceContext}
-                  disabled={projectCollab.viewerOnly}
+                  disabled={projectMutationReadOnly}
                   onChange={handleChangeDesignSystemId}
                 />
               )}
@@ -11223,8 +11268,13 @@ export function ProjectView({
         <FileWorkspace
           projectId={project.id}
           projectName={currentProject.name}
-          viewerOnly={projectCollab.viewerOnly}
-          readonlyNotice={readonlyNoticeText}
+          viewerOnly={projectMutationReadOnly}
+          materializationPending={projectCollab.materializationPending}
+          readonlyNotice={
+            projectCollab.materializationPending
+              ? t('designFiles.syncing')
+              : readonlyNoticeText
+          }
           fileSyncBadge={fileSyncBadge}
           projectKind={projectKindFromMetadataToTracking(currentProject.metadata) ?? 'prototype'}
           rootDirName={(() => {
@@ -11907,7 +11957,7 @@ function latestDesignSystemActivityEvents(messages: ChatMessage[]): AgentEvent[]
 }
 
 function pluginWorkflowTitle(action: PluginFolderAgentAction): string {
-  return action === 'publish' ? 'Publish repo' : 'Open Design PR';
+  return action === 'publish' ? 'Publish repo' : 'OpenDesign PR';
 }
 
 function pluginWorkflowCliCommand(action: PluginFolderAgentAction, relativePath: string): string {
@@ -11926,7 +11976,7 @@ function pluginWorkflowPlannedSteps(action: PluginFolderAgentAction): string[] {
     ];
   }
   return [
-    'Ensure the Open Design fork exists',
+    'Ensure the OpenDesign fork exists',
     'Clone the fork and prepare a branch',
     'Copy the plugin into plugins/community',
     'Push the branch and open the PR form',
@@ -12047,7 +12097,7 @@ export function resolveSucceededRunStatus(status: ChatMessage['runStatus']): Cha
 const DESIGN_RESULT_MISSING_DETAIL =
   'The design run finished without producing a deliverable project file.';
 const DESIGN_RESULT_DELIVERY_FAILED_DETAIL =
-  'The design result was generated, but Open Design could not save it to the project.';
+  'The design result was generated, but OpenDesign could not save it to the project.';
 
 function applyDesignDeliveryOutcome(
   message: ChatMessage,
